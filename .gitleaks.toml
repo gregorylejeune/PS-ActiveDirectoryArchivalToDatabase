@@ -2,11 +2,6 @@ title = "PS-ActiveDirectoryArchivalToDatabase"
 
 [allowlist]
 description = "Documentation placeholders only. Real credentials must not match these."
-paths = [
-  '''README.md''',
-  '''AGENTS.md''',
-  '''docs/runner-signing.md'''
-]
 regexes = [
   '''archive-reader@example.com''',
   '''example-only-replace-before-use''',
