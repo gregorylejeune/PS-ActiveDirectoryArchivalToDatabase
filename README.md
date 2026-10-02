@@ -143,16 +143,44 @@ Secret scanning is a required build gate. `.gitleaks.toml` allowlists only the d
 
 ## Code signing and deployment
 
-Signing happens only after the secret scan passes. The signing certificate stays in the runner secret store. It is not committed.
+This repository does not ship a signing certificate, and the author does not sign adopter builds. Signing is adopter-owned: each fork configures its own certificate and its own pipeline.
 
-Runner rules:
+The default path is unsigned. Local and dev use needs no certificate. CI still secret-scans, parses, and tests.
 
-- The runner account is not a domain admin and does not need SQL rights. Signing and archive execution are different accounts.
-- Sign on a Windows runner with PowerShell 7. Use `Set-AuthenticodeSignature -HashAlgorithm SHA256 -TimestampServer http://timestamp.digicert.com`. Timestamping is required so the signature survives certificate expiry. The URL must start with `http://`; PowerShell's cmdlet does not support HTTPS timestamping.
-- The signing authority is an enterprise code-signing CA already trusted by the archive hosts, or a public Authenticode CA. Do not mint a self-signed certificate in the job, and do not use a developer personal certificate. The certificate needs the Code Signing enhanced key usage and must not be expired.
-- Store the PFX as `CODESIGN_PFX_B64` and the PFX password as `CODESIGN_PFX_PASSWORD` in the Actions environment for `main`. Write the PFX only under `RUNNER_TEMP` and delete it after signing. A non-exportable key in an HSM or Key Vault is better when the runner can reach it.
-- Sign every PowerShell file type: `.ps1`, `.psm1`, `.psd1`, `.ps1xml`.
-- Deploy only the signed artifact. On each archive host, trust the issuing CA and put the code-signing certificate in Trusted Publishers. Do not set `Bypass`. After copy, `Get-AuthenticodeSignature` must be `Valid` and the signer thumbprint must match the authority. Stop on `NotSigned`, `HashMismatch`, or `UnknownError`.
-- SQL stays pass-through. The signing certificate is not the Active Directory bind account.
+Generate the workflow for your fork with `New-AdopterBuildPipeline.ps1`. It writes `.github/workflows/ci.yml` with a `workflow_dispatch` input `signing_provider` (falling back to repository variable `SIGNING_PROVIDER`). Allowed values: `none` (default), `pfx`, `azure-key-vault`, `ci-service`. An empty or unknown value is `none`.
 
-Microsoft's guidance for CI/CD signing points at Azure Key Vault with an HSM-backed certificate, signed through AzureSignTool, or the Azure Artifact Signing service (about ten dollars a month) which integrates directly with GitHub Actions. Since June 2023, CAs require code-signing keys on FIPS 140-2 Level 2 hardware or better, so the HSM-backed path is the modern default.
+```powershell
+pwsh .\New-AdopterBuildPipeline.ps1
+pwsh .\New-AdopterBuildPipeline.ps1 -SigningProvider Pfx -TimestampServer 'http://timestamp.example.com'
+pwsh .\New-AdopterBuildPipeline.ps1 -SigningProvider AzureKeyVault -TimestampServer 'http://timestamp.example.com'
+pwsh .\New-AdopterBuildPipeline.ps1 -SigningProvider CiService
+```
+
+Each adopter configures their own secrets, their own code-signing CA (enterprise or public Authenticode), and their own RFC 3161 timestamp URL in repository variable `TIMESTAMP_SERVER`. Do not reuse `http://timestamp.digicert.com` or any example thumbprint from this README.
+
+They must not commit a PFX, password, or CA private key, must not put those values in `README.md` or `AGENTS.md`, and must not set execution policy `Bypass` or `Unrestricted` to skip signature checks.
+
+Before a host runs an archive job, the adopter verifies every shipped `.ps1`, `.psm1`, `.psd1`, and `.ps1xml`:
+
+```powershell
+Get-ChildItem -Recurse -Include *.ps1,*.psm1,*.psd1,*.ps1xml |
+  Get-AuthenticodeSignature |
+  Where-Object Status -ne 'Valid'
+```
+
+That command must return nothing. `NotSigned` is acceptable only when `SIGNING_PROVIDER` is `none`. `HashMismatch` or `UnknownError` stops the deploy. When signing is on, the signer thumbprint must match the adopter's own certificate, not a value copied from this repo.
+
+An HSM is a hardware or cloud device that holds the private key so the key never leaves it. It matters only for adopters whose CA requires a hardware-backed code-signing key. A PFX in the adopter's own Actions environment secrets is acceptable. Write it under `RUNNER_TEMP`, sign, and delete it in an `if: always()` step. Do not describe an HSM as mandatory.
+
+Adopter-owned settings per mode:
+
+| Mode | Adopter-owned settings |
+| --- | --- |
+| `none` | Nothing. |
+| `pfx` | Secrets `CODESIGN_PFX_B64`, `CODESIGN_PFX_PASSWORD`. Variable `TIMESTAMP_SERVER`. |
+| `azure-key-vault` | Secrets `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET` (prefer a federated GitHub OIDC credential and drop the client secret). Variables `AZURE_KEY_VAULT_URL`, `AZURE_CERT_NAME`, `TIMESTAMP_SERVER`. |
+| `ci-service` | Replace `.github/signing/Invoke-AdopterSign.ps1`. Keep that service's token in their secrets, not in the script. |
+
+The code-signing certificate needs the Code Signing enhanced key usage. Do not mint a self-signed cert inside the job. The archive host must trust that CA and, for PowerShell execution policy `AllSigned`, have the cert in Trusted Publishers. The runner account is not the SQL or Active Directory account. SQL stays pass-through. The signing certificate is not the Active Directory bind account.
+
+Microsoft's guidance for CI/CD signing points at Azure Key Vault with an HSM-backed certificate, signed through AzureSignTool, or the Azure Artifact Signing service (about ten dollars a month) which integrates directly with GitHub Actions. Since June 2023, CAs require code-signing keys on FIPS 140-2 Level 2 hardware or better, so the HSM-backed path is the modern default for adopters whose CA requires it.
