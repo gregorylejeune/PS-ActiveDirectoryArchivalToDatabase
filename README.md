@@ -143,6 +143,4 @@ Enable GitHub secret scanning and push protection on your fork. This repository 
 
 ## Code signing
 
-One code signing guide to rule them all: [`.github/signing/README.md`](.github/signing/README.md).
-
-That guide is the single source of truth for signing. This README does not repeat it. It covers the four signing modes (`none`, `pfx`, `azure-key-vault`, `ci-service`), the `New-AdopterBuildPipeline.ps1` generator, the `code-signing` Actions environment, the verification command, and the HSM note.
+See [`.github/signing/README.md`](.github/signing/README.md) for all code signing documentation: the four signing modes, the `New-AdopterBuildPipeline.ps1` generator, the `code-signing` Actions environment, verification, and the HSM note.
