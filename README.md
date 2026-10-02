@@ -112,4 +112,10 @@ pwsh .\Invoke-EntraUserArchive.ps1 -SecretProvider AWS
 pwsh .\Invoke-EntraUserArchive.ps1 -SecretProvider Azure
 ```
 
-Optional on-prem server override: `.\Invoke-OnPremAdArchive.ps1 -Server "dc01.contoso.local"`
+By default the on-prem job reads the domain the Windows account is already logged into. It does not need a server name for that. Pass `-Server` only when that account can reach a different domain controller and you want the read pinned to that host:
+
+```powershell
+pwsh .\Invoke-OnPremAdArchive.ps1 -Server "dc01.contoso.local"
+```
+
+`dc01.contoso.local` is an example domain controller name, not a server this repository ships with. Replace it with a controller in the domain you are archiving. Omit `-Server` for a normal run against the logon domain.
