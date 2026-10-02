@@ -135,32 +135,47 @@ pwsh .\Invoke-OnPremAdArchive.ps1 -Domain "glejeune.org"
 
 ## Secret scanning
 
-Secret scanning is a required build gate. `.gitleaks.toml` allowlists only the documentation placeholders: `archive-reader@example.com`, `example-only-replace-before-use`, and the all-zero GUID. A real credential in that allowlist is a failed review.
+Secret scanning is a required build gate. `.github/workflows/ci.yml` runs gitleaks on the full git history on every push to `main` and every pull request. A finding fails the workflow. Secret values are redacted in the runner log.
 
-- Gitleaks runs on the full history on every push and pull request. A finding fails the workflow.
-- GitHub secret scanning and push protection are also enabled on the repo.
-- Secret values are never printed in the runner log.
+`.gitleaks.toml` allowlists only these documentation placeholders: `archive-reader@example.com`, `example-only-replace-before-use`, and the all-zero GUID `00000000-0000-0000-0000-000000000000`. It does not allowlist whole files. A real credential in `README.md` or `AGENTS.md` fails the scan. A real credential that matches an allowlisted placeholder is a failed review.
 
-## Code signing and deployment
+Enable GitHub secret scanning and push protection on your fork. This repository does not store your secrets.
 
-This repository does not ship a signing certificate, and the author does not sign adopter builds. Signing is adopter-owned: each fork configures its own certificate and its own pipeline.
+## Code signing
 
-The default path is unsigned. Local and dev use needs no certificate. CI still secret-scans, parses, and tests.
+This repository does not ship a signing certificate. The author does not sign builds for adopters. Each adopter signs with their own infrastructure, or not at all.
 
-Generate the workflow for your fork with `New-AdopterBuildPipeline.ps1`. It writes `.github/workflows/ci.yml` with a `workflow_dispatch` input `signing_provider` (falling back to repository variable `SIGNING_PROVIDER`). Allowed values: `none` (default), `pfx`, `azure-key-vault`, `ci-service`. An empty or unknown value is `none`.
+The default path is unsigned. Local and dev use needs no certificate. `.github/workflows/ci.yml` still secret-scans, parses PowerShell 7, and runs Pester when `*.Tests.ps1` files exist.
 
-```powershell
-pwsh .\New-AdopterBuildPipeline.ps1
-pwsh .\New-AdopterBuildPipeline.ps1 -SigningProvider Pfx -TimestampServer 'http://timestamp.example.com'
-pwsh .\New-AdopterBuildPipeline.ps1 -SigningProvider AzureKeyVault -TimestampServer 'http://timestamp.example.com'
-pwsh .\New-AdopterBuildPipeline.ps1 -SigningProvider CiService
-```
+Signing is optional. Select it with the `workflow_dispatch` input `signing_provider`, or with the repository variable `SIGNING_PROVIDER` when you dispatch. Allowed values:
 
-Each adopter configures their own secrets, their own code-signing CA (enterprise or public Authenticode), and their own RFC 3161 timestamp URL in repository variable `TIMESTAMP_SERVER`. Do not reuse `http://timestamp.digicert.com` or any example thumbprint from this README.
+| Mode | Meaning |
+| --- | --- |
+| `none` | Default. Build and test only. The sign job does not run. |
+| `pfx` | Sign with your PFX from your Actions environment secrets. |
+| `azure-key-vault` | Sign with Azure Key Vault and AzureSignTool. |
+| `ci-service` | Sign with your own CI signing script. |
 
-They must not commit a PFX, password, or CA private key, must not put those values in `README.md` or `AGENTS.md`, and must not set execution policy `Bypass` or `Unrestricted` to skip signature checks.
+An empty or unknown value is `none`. The sign job runs only when someone dispatches the workflow in this repository and `signing_provider` is not `none`. Pull requests are never signed. Choosing `none` does not fail the pipeline.
 
-Before a host runs an archive job, the adopter verifies every shipped `.ps1`, `.psm1`, `.psd1`, and `.ps1xml`:
+Create a GitHub Actions environment named `code-signing` on your fork. Put secrets and variables there, not in the repo.
+
+| Mode | What you configure |
+| --- | --- |
+| `none` | Nothing. |
+| `pfx` | Secrets `CODESIGN_PFX_B64` and `CODESIGN_PFX_PASSWORD`. Variable `TIMESTAMP_SERVER` (your RFC 3161 URL). |
+| `azure-key-vault` | Secrets `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, and `AZURE_CLIENT_SECRET`. Prefer a GitHub OIDC federated credential and drop the client secret when you can. Variables `AZURE_KEY_VAULT_URL`, `AZURE_CERT_NAME`, and `TIMESTAMP_SERVER`. |
+| `ci-service` | Replace `.github/signing/Invoke-AdopterSign.ps1`. Keep that service's token in your secrets, not in the script. The stock file throws `replace this with your signer.` |
+
+The workflow writes a PFX only under `RUNNER_TEMP` and deletes it afterward, including when the sign step fails. It does not print the PFX or the password.
+
+Use your own code-signing CA (an enterprise CA your archive hosts already trust, or a public Authenticode CA) and your own timestamp server. Do not reuse an example timestamp URL or thumbprint from this README. The certificate needs the Code Signing enhanced key usage. Do not mint a self-signed certificate in the job.
+
+An HSM (hardware security module) is a physical or cloud device that holds the private key so the key never leaves the device. You need one only when your CA requires a hardware-backed code-signing key. Most adopters should use a PFX stored as their own Actions secret and deleted after use. That is acceptable. An HSM is not mandatory.
+
+Do not commit a PFX, a PFX password, or a CA private key. Do not set the PowerShell execution policy to `Bypass` or `Unrestricted` to skip signature checks. The runner account that signs is not the SQL account and not the Active Directory bind account.
+
+Before an archive host runs a signed build, verify every script. This must return no rows:
 
 ```powershell
 Get-ChildItem -Recurse -Include *.ps1,*.psm1,*.psd1,*.ps1xml |
@@ -168,19 +183,4 @@ Get-ChildItem -Recurse -Include *.ps1,*.psm1,*.psd1,*.ps1xml |
   Where-Object Status -ne 'Valid'
 ```
 
-That command must return nothing. `NotSigned` is acceptable only when `SIGNING_PROVIDER` is `none`. `HashMismatch` or `UnknownError` stops the deploy. When signing is on, the signer thumbprint must match the adopter's own certificate, not a value copied from this repo.
-
-An HSM is a hardware or cloud device that holds the private key so the key never leaves it. It matters only for adopters whose CA requires a hardware-backed code-signing key. A PFX in the adopter's own Actions environment secrets is acceptable. Write it under `RUNNER_TEMP`, sign, and delete it in an `if: always()` step. Do not describe an HSM as mandatory.
-
-Adopter-owned settings per mode:
-
-| Mode | Adopter-owned settings |
-| --- | --- |
-| `none` | Nothing. |
-| `pfx` | Secrets `CODESIGN_PFX_B64`, `CODESIGN_PFX_PASSWORD`. Variable `TIMESTAMP_SERVER`. |
-| `azure-key-vault` | Secrets `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET` (prefer a federated GitHub OIDC credential and drop the client secret). Variables `AZURE_KEY_VAULT_URL`, `AZURE_CERT_NAME`, `TIMESTAMP_SERVER`. |
-| `ci-service` | Replace `.github/signing/Invoke-AdopterSign.ps1`. Keep that service's token in their secrets, not in the script. |
-
-The code-signing certificate needs the Code Signing enhanced key usage. Do not mint a self-signed cert inside the job. The archive host must trust that CA and, for PowerShell execution policy `AllSigned`, have the cert in Trusted Publishers. The runner account is not the SQL or Active Directory account. SQL stays pass-through. The signing certificate is not the Active Directory bind account.
-
-Microsoft's guidance for CI/CD signing points at Azure Key Vault with an HSM-backed certificate, signed through AzureSignTool, or the Azure Artifact Signing service (about ten dollars a month) which integrates directly with GitHub Actions. Since June 2023, CAs require code-signing keys on FIPS 140-2 Level 2 hardware or better, so the HSM-backed path is the modern default for adopters whose CA requires it.
+`NotSigned` is acceptable only when you chose `none`. `HashMismatch` or `UnknownError` stops the deploy. When signing is on, the signer thumbprint must match your certificate, not a value copied from this repo.

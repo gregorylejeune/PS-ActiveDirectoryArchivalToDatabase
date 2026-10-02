@@ -1,0 +1,132 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      signing_provider:
+        description: none, pfx, azure-key-vault, or ci-service
+        type: choice
+        default: none
+        options: [none, pfx, azure-key-vault, ci-service]
+
+permissions:
+  contents: read
+
+jobs:
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - name: Install gitleaks
+        run: |
+          curl -sSfL -o /tmp/gitleaks.tar.gz https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  /tmp/gitleaks.tar.gz" | sha256sum -c -
+          sudo tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks
+      - name: gitleaks
+        run: gitleaks detect --source . --config .gitleaks.toml --redact --verbose --exit-code 1
+
+  build-test:
+    needs: secret-scan
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Parse PowerShell 7
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Get-ChildItem -Recurse -Include *.ps1,*.psm1,*.psd1 |
+            ForEach-Object {
+              $tokens = $null
+              $errors = $null
+              [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors)
+              if ($errors) { throw "$($_.FullName): $($errors | Out-String)" }
+            }
+      - name: Pester if present
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tests = @(Get-ChildItem -Recurse -Filter *.Tests.ps1 -ErrorAction SilentlyContinue)
+          if ($tests.Count -eq 0) { Write-Host 'No Pester tests; skip.'; exit 0 }
+          if (-not (Get-Module -ListAvailable -Name Pester)) {
+            Install-Module Pester -Scope CurrentUser -Force -ErrorAction Stop
+          }
+          Invoke-Pester -Path $tests.FullName -CI
+
+  sign:
+    needs: build-test
+    # workflow_dispatch only runs in this repository, so a pull request from
+    # another repo cannot reach this job. Dispatch input wins; SIGNING_PROVIDER
+    # is used only when the input is none.
+    if: >
+      github.event_name == 'workflow_dispatch' &&
+      (
+        (inputs.signing_provider != 'none' && inputs.signing_provider != '') ||
+        (inputs.signing_provider == 'none' && vars.SIGNING_PROVIDER != 'none' && vars.SIGNING_PROVIDER != '')
+      )
+    runs-on: windows-latest
+    environment: code-signing
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Require adopter timestamp server
+        if: >
+          inputs.signing_provider == 'pfx' ||
+          inputs.signing_provider == 'azure-key-vault' ||
+          (inputs.signing_provider == 'none' && (vars.SIGNING_PROVIDER == 'pfx' || vars.SIGNING_PROVIDER == 'azure-key-vault'))
+        shell: pwsh
+        env:
+          TIMESTAMP_SERVER: ${{ vars.TIMESTAMP_SERVER }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:TIMESTAMP_SERVER)) {
+            throw 'Set repository variable TIMESTAMP_SERVER to your RFC 3161 URL. Do not reuse an example from upstream.'
+          }
+      - name: Sign with PFX
+        if: inputs.signing_provider == 'pfx' || (inputs.signing_provider == 'none' && vars.SIGNING_PROVIDER == 'pfx')
+        shell: pwsh
+        env:
+          CODESIGN_PFX_B64: ${{ secrets.CODESIGN_PFX_B64 }}
+          CODESIGN_PFX_PASSWORD: ${{ secrets.CODESIGN_PFX_PASSWORD }}
+          TIMESTAMP_SERVER: ${{ vars.TIMESTAMP_SERVER }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pfx = Join-Path $env:RUNNER_TEMP 'codesign.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:CODESIGN_PFX_B64))
+          $cert = [Security.Cryptography.X509Certificates.X509Certificate2]::new($pfx, $env:CODESIGN_PFX_PASSWORD)
+          Get-ChildItem -Recurse -Include *.ps1,*.psm1,*.psd1,*.ps1xml | ForEach-Object {
+            $sig = Set-AuthenticodeSignature -FilePath $_.FullName -Certificate $cert -HashAlgorithm SHA256 -TimestampServer $env:TIMESTAMP_SERVER
+            if ($sig.Status -ne 'Valid') { throw "$($_.Name) $($sig.Status)" }
+          }
+      - name: Delete PFX
+        if: always() && (inputs.signing_provider == 'pfx' || (inputs.signing_provider == 'none' && vars.SIGNING_PROVIDER == 'pfx'))
+        shell: pwsh
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP 'codesign.pfx'
+          Remove-Item -LiteralPath $pfx -Force -ErrorAction SilentlyContinue
+          Remove-Item Env:CODESIGN_PFX_B64, Env:CODESIGN_PFX_PASSWORD -ErrorAction SilentlyContinue
+      - name: Sign with Azure Key Vault
+        if: inputs.signing_provider == 'azure-key-vault' || (inputs.signing_provider == 'none' && vars.SIGNING_PROVIDER == 'azure-key-vault')
+        shell: pwsh
+        env:
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          KEY_VAULT_URL: ${{ vars.AZURE_KEY_VAULT_URL }}
+          CERT_NAME: ${{ vars.AZURE_CERT_NAME }}
+          TIMESTAMP_SERVER: ${{ vars.TIMESTAMP_SERVER }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          dotnet tool install --global AzureSignTool
+          $tool = Join-Path $env:USERPROFILE '.dotnet\tools\AzureSignTool.exe'
+          Get-ChildItem -Recurse -Include *.ps1,*.psm1,*.psd1,*.ps1xml | ForEach-Object {
+            & $tool sign -kvu $env:KEY_VAULT_URL -kvc $env:CERT_NAME -kvt $env:AZURE_TENANT_ID -kvi $env:AZURE_CLIENT_ID -kvs $env:AZURE_CLIENT_SECRET -tr $env:TIMESTAMP_SERVER -td sha256 $_.FullName
+            if ($LASTEXITCODE -ne 0) { throw "AzureSignTool failed for $($_.Name)" }
+          }
+      - name: Sign with adopter CI service
+        if: inputs.signing_provider == 'ci-service' || (inputs.signing_provider == 'none' && vars.SIGNING_PROVIDER == 'ci-service')
+        shell: pwsh
+        run: pwsh -File .github/signing/Invoke-AdopterSign.ps1

@@ -1,6 +1,10 @@
+#Requires -Version 7.0
 <#
+.SYNOPSIS
+    Adopter-owned Authenticode signer. The stock file refuses to sign.
 .DESCRIPTION
-    Stub for adopters who chose the ci-service signing provider.
-    Replace this file with your own signer. Do not put a token in this file.
+    Replace this script when signing_provider is ci-service.
+    Read tokens from the Actions environment. Do not print them.
 #>
-throw "Replace Invoke-AdopterSign.ps1 with your signer. Do not put a token in this file."
+$ErrorActionPreference = 'Stop'
+throw 'replace this with your signer.'
