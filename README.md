@@ -48,7 +48,23 @@ Pass-through authentication is used for SQL Server. The account running the scri
 
 If `AWS_ACCESS_KEY` or `AWS_SECRET_KEY` is missing, the script stops with: these are required to allow secrets retrieval from AWS secrets management.
 
-The Entra secret JSON is expected to contain `tenantId`, `clientId`, and `clientSecret`. The app registration needs Microsoft Graph application permission `User.Read.All` (admin consent).
+The Entra secret must already exist in AWS Secrets Manager. `AD_ARCHIVE_ENTRA_SECRET_ID` is its name or ARN. The secret string is JSON with this shape and no extra required fields:
+
+```json
+{
+  "tenantId": "00000000-0000-0000-0000-000000000000",
+  "clientId": "00000000-0000-0000-0000-000000000000",
+  "clientSecret": "the app registration client secret value"
+}
+```
+
+| Field | Required | Format |
+| --- | --- | --- |
+| `tenantId` | yes | Entra tenant GUID |
+| `clientId` | yes | App registration application (client) id GUID |
+| `clientSecret` | yes | Current client secret value, not the secret id |
+
+The app registration needs Microsoft Graph application permission `User.Read.All` with admin consent. The script reads those three fields only. Do not put the SQL password, AWS keys, or directory passwords in this secret. SQL Server still uses pass-through authentication.
 
 On-prem reads need an account that can read user objects and the schema naming context. Access denied is logged as a permission failure so Active Directory administrators can grant read access. The script does not attempt to raise its own privileges.
 
