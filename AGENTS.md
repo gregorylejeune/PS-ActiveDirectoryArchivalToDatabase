@@ -24,18 +24,18 @@ This repository archives users. It does not delete them, disable them, or change
 
 Both jobs read one secret named by `AD_ARCHIVE_ENTRA_SECRET_ID`. AWS uses `AWS.Tools.SecretsManager` (`Get-SECSecretValue`) with `AWS_ACCESS_KEY` and `AWS_SECRET_KEY` passed as parameters. Azure Key Vault uses `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, and `AD_ARCHIVE_AZURE_VAULT_NAME`.
 
-The secret string must be this JSON:
+The secret string must be this JSON. On-prem example values are placeholders on the reserved `example.com` domain. Replace them before use. Do not commit a real username or credential.
 
 ```json
 {
   "ActiveDirectoryOnPrem": {
-    "Username": "blahblahblah-@blag.org",
-    "Password": "super secret example of json schema"
+    "Username": "archive-reader@example.com",
+    "Password": "example-only-replace-before-use"
   },
   "AzureGraphAPI": {
     "tenantId": "00000000-0000-0000-0000-000000000000",
     "clientId": "00000000-0000-0000-0000-000000000000",
-    "clientSecret": "the app registration client secret value"
+    "clientSecret": "example-only-replace-before-use"
   },
   "Purpose": "For archival of Active Directory and entra",
   "InDaysOfInactivityBeforeDeleteQueue": 365
@@ -58,3 +58,4 @@ On-prem binds with `ActiveDirectoryOnPrem`. Graph uses only `AzureGraphAPI`. Do 
 - Do not install RSAT or the AWS CLI unless the operator passed `-Install`.
 - Do not commit `logs/`.
 - Do not hardcode a domain name.
+- Do not put a real credential in an example.
