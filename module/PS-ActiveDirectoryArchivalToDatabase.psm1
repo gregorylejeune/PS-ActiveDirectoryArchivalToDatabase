@@ -77,6 +77,7 @@ VALUES
     }
     catch {
         Write-ArchiveLog -Level ERROR -Message "Directory audit insert failed for $ActionName. $($_.Exception.Message)"
+        throw "Directory audit insert failed for $ActionName. The directory call cannot continue without an audit row. $($_.Exception.Message)"
     }
 }
 
@@ -152,7 +153,13 @@ function Get-ArchiveSqlConnectionString {
         if ([string]::IsNullOrWhiteSpace($server) -or [string]::IsNullOrWhiteSpace($database)) {
             throw 'AD_ARCHIVE_SQL_SERVER and AD_ARCHIVE_SQL_DATABASE are required. SQL authentication is pass-through only; do not place a SQL password in the environment.'
         }
-        return "Server=$server;Database=$database;Integrated Security=True;Encrypt=True;TrustServerCertificate=True;Application Name=PS-ActiveDirectoryArchivalToDatabase;"
+        $trust = $env:AD_ARCHIVE_SQL_TRUST_SERVER_CERTIFICATE
+        $trustServerCertificate = ($trust -eq 'true' -or $trust -eq '1')
+        if ($trustServerCertificate) {
+            Write-ArchiveLog -Level WARN -Message 'AD_ARCHIVE_SQL_TRUST_SERVER_CERTIFICATE is set. SQL Server certificate validation is disabled for this process.'
+        }
+        $trustClause = if ($trustServerCertificate) { 'TrustServerCertificate=True;' } else { 'TrustServerCertificate=False;' }
+        return "Server=$server;Database=$database;Integrated Security=True;Encrypt=True;$trustClause Application Name=PS-ActiveDirectoryArchivalToDatabase;"
     }
     catch {
         Write-ArchiveLog -Level ERROR -Message $_.Exception.Message
@@ -205,6 +212,7 @@ function Initialize-ArchiveDatabase {
     )
     try {
         Write-ArchiveLog -Message 'Initializing archive database schema with pass-through authentication.'
+        [void](Test-ArchivePrerequisites -Job Schema)
         if (-not (Test-Path -LiteralPath $SchemaFile)) {
             throw "Schema file not found: $SchemaFile"
         }
@@ -558,6 +566,8 @@ VALUES
 function Get-AwsSecretString {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$SecretId)
+    $priorAccessKey = $env:AWS_ACCESS_KEY_ID
+    $priorSecretKey = $env:AWS_SECRET_ACCESS_KEY
     try {
         Assert-AwsSecretPrerequisites
         $env:AWS_ACCESS_KEY_ID = $env:AWS_ACCESS_KEY
@@ -576,6 +586,10 @@ function Get-AwsSecretString {
     catch {
         Write-ArchiveLog -Level ERROR -Message "Secret retrieval failed. $($_.Exception.Message)"
         throw
+    }
+    finally {
+        if ($null -eq $priorAccessKey) { Remove-Item Env:AWS_ACCESS_KEY_ID -ErrorAction SilentlyContinue } else { $env:AWS_ACCESS_KEY_ID = $priorAccessKey }
+        if ($null -eq $priorSecretKey) { Remove-Item Env:AWS_SECRET_ACCESS_KEY -ErrorAction SilentlyContinue } else { $env:AWS_SECRET_ACCESS_KEY = $priorSecretKey }
     }
 }
 
@@ -661,6 +675,7 @@ function Invoke-OnPremArchive {
     $schemaVersionId = 0
     try {
         Write-ArchiveLog -Message "Starting on-prem Active Directory archive run $runId."
+        [void](Test-ArchivePrerequisites -Job OnPrem)
         $schema = @(Get-OnPremSchemaAttributes -Server $Server | ForEach-Object {
             [pscustomobject]@{
                 Name = $_.lDAPDisplayName
@@ -708,6 +723,7 @@ function Invoke-EntraArchive {
     $schemaVersionId = 0
     try {
         Write-ArchiveLog -Message "Starting Entra ID archive run $runId."
+        [void](Test-ArchivePrerequisites -Job Entra)
         Assert-AwsSecretPrerequisites
         $secretId = $env:AD_ARCHIVE_ENTRA_SECRET_ID
         if ([string]::IsNullOrWhiteSpace($secretId)) {
@@ -767,23 +783,27 @@ function Test-ArchivePrerequisites {
         $needSql = $true
 
         $checks += [pscustomobject]@{
-            Name = 'Windows PowerShell 5.1 host'
-            Ready = ($PSVersionTable.PSEdition -eq 'Desktop' -or $PSVersionTable.PSVersion.Major -eq 5)
-            Detail = "Edition=$($PSVersionTable.PSEdition) Version=$($PSVersionTable.PSVersion)"
+            Name = 'PowerShell 7 host'
+            Ready = ($PSVersionTable.PSVersion.Major -ge 7)
+            Detail = "Edition=$($PSVersionTable.PSEdition) Version=$($PSVersionTable.PSVersion). Run with pwsh 7 or later."
         }
 
-        $sqlClient = [bool]([System.AppDomain]::CurrentDomain.GetAssemblies() | Where-Object { $_.GetName().Name -eq 'System.Data' })
-        if (-not $sqlClient) {
+        $sqlClientReady = $false
+        try {
+            Add-Type -AssemblyName System.Data.SqlClient -ErrorAction Stop
+            $sqlClientReady = $true
+        }
+        catch {
             try {
-                Add-Type -AssemblyName System.Data
-                $sqlClient = $true
+                Add-Type -AssemblyName Microsoft.Data.SqlClient -ErrorAction Stop
+                $sqlClientReady = $true
             }
-            catch { $sqlClient = $false }
+            catch { $sqlClientReady = $false }
         }
         $checks += [pscustomobject]@{
-            Name = 'System.Data.SqlClient'
-            Ready = $sqlClient
-            Detail = 'Built into Windows PowerShell. Required for pass-through SQL connections.'
+            Name = 'SqlClient'
+            Ready = $sqlClientReady
+            Detail = 'PowerShell 7 needs System.Data.SqlClient or Microsoft.Data.SqlClient. Install the SqlServer module if neither loads.'
         }
 
         if ($needOnPrem) {
@@ -850,6 +870,44 @@ function Test-ArchivePrerequisites {
                 Name = 'AD_ARCHIVE_SQL_DATABASE'
                 Ready = -not [string]::IsNullOrWhiteSpace($env:AD_ARCHIVE_SQL_DATABASE)
                 Detail = 'Archive database name.'
+            }
+            if (-not [string]::IsNullOrWhiteSpace($env:AD_ARCHIVE_SQL_SERVER) -and -not [string]::IsNullOrWhiteSpace($env:AD_ARCHIVE_SQL_DATABASE) -and $sqlClientReady) {
+                $sqlReachable = $false
+                $sqlDetail = 'Pass-through connection was not opened.'
+                try {
+                    $probe = New-Object System.Data.SqlClient.SqlConnection (Get-ArchiveSqlConnectionString)
+                    $probe.Open()
+                    $probe.Close()
+                    $sqlReachable = $true
+                    $sqlDetail = 'Pass-through connection opened and closed.'
+                }
+                catch {
+                    $sqlDetail = "Pass-through connection failed. $($_.Exception.Message)"
+                }
+                $checks += [pscustomobject]@{
+                    Name = 'SQL pass-through connection'
+                    Ready = $sqlReachable
+                    Detail = $sqlDetail
+                }
+            }
+        }
+
+        if ($needOnPrem -and (Get-Module -ListAvailable -Name ActiveDirectory)) {
+            $adReachable = $false
+            $adDetail = 'Active Directory domain was not contacted.'
+            try {
+                Import-Module ActiveDirectory -ErrorAction Stop
+                $domain = Get-ADDomain
+                $adReachable = $null -ne $domain
+                $adDetail = "Contacted domain $($domain.DNSRoot)."
+            }
+            catch {
+                $adDetail = "Active Directory read failed. Request read access from the Active Directory administrators if this is access denied. $($_.Exception.Message)"
+            }
+            $checks += [pscustomobject]@{
+                Name = 'Active Directory reachability'
+                Ready = $adReachable
+                Detail = $adDetail
             }
         }
 

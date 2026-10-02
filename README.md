@@ -64,21 +64,21 @@ Secrets, connection strings, and attribute values are not written to the log.
 
 ## Host prerequisites
 
-The archive host is expected to be Windows PowerShell 5.1 on a domain-joined machine. The scripts do not install modules unless you pass `-Install`.
+The archive host is PowerShell 7 (`pwsh`) on a domain-joined Windows machine. The scripts require version 7.0 or later and do not install modules unless you pass `-Install`.
 
 | Need | Used by | How to provide it |
 | --- | --- | --- |
 | ActiveDirectory module | On-prem job | RSAT: `Add-WindowsCapability -Online -Name Rsat.ActiveDirectory.DS-LDS.Tools~~~~0.0.1.0` |
 | AWS CLI v2 | Entra job | `winget install --id Amazon.AWSCLI -e` |
-| System.Data.SqlClient | Every SQL call | Built into Windows PowerShell 5.1 |
+| SqlClient | Every SQL call | PowerShell 7 needs `System.Data.SqlClient` or `Microsoft.Data.SqlClient`. `Install-Module SqlServer -Scope CurrentUser` if neither loads. |
 | SQL environment variables | Every job | `AD_ARCHIVE_SQL_SERVER`, `AD_ARCHIVE_SQL_DATABASE` |
 | AWS key environment variables | Entra job | `AWS_ACCESS_KEY`, `AWS_SECRET_KEY` |
 
 Check before a run:
 
 ```powershell
-.\Test-ArchivePrerequisites.ps1 -Job All
-.\Test-ArchivePrerequisites.ps1 -Job OnPrem -Install
+pwsh .\Test-ArchivePrerequisites.ps1 -Job All
+pwsh .\Test-ArchivePrerequisites.ps1 -Job OnPrem -Install
 ```
 
 `-Install` asks Windows to add RSAT and winget to add the AWS CLI. If the account is not a local administrator, the check logs the permission failure and stops. It does not elevate itself. Active Directory read rights are separate from local admin rights and still have to be granted by the Active Directory administrators.
@@ -86,9 +86,9 @@ Check before a run:
 ## Run
 
 ```powershell
-.\Initialize-ArchiveSchema.ps1
-.\Invoke-OnPremAdArchive.ps1
-.\Invoke-EntraUserArchive.ps1
+pwsh .\Initialize-ArchiveSchema.ps1
+pwsh .\Invoke-OnPremAdArchive.ps1
+pwsh .\Invoke-EntraUserArchive.ps1
 ```
 
 Optional on-prem server override: `.\Invoke-OnPremAdArchive.ps1 -Server "dc01.contoso.local"`

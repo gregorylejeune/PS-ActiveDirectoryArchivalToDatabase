@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+#Requires -Version 7.0
 <#
 .SYNOPSIS
     Check the Windows host for the modules, CLI, and environment variables the archive jobs need.

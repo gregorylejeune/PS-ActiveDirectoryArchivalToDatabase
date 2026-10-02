@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+#Requires -Version 7.0
 <#
 .SYNOPSIS
     Archive every on-premises Active Directory user into SQL Server staging, then merge into the system-versioned archive.

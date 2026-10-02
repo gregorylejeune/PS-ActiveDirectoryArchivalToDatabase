@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+#Requires -Version 7.0
 <#
 .SYNOPSIS
     Create the SQL Server archive schema used by the on-prem and Entra jobs.
