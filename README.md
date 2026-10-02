@@ -53,13 +53,13 @@ Both jobs read one secret. `-SecretProvider AWS` uses `AWS.Tools.SecretsManager`
 ```json
 {
   "ActiveDirectoryOnPrem": {
-    "Username": "blahblahblah-@blag.org",
-    "Password": "super secret example of json schema"
+    "Username": "archive-reader@example.com",
+    "Password": "example-only-replace-before-use"
   },
   "AzureGraphAPI": {
     "tenantId": "00000000-0000-0000-0000-000000000000",
     "clientId": "00000000-0000-0000-0000-000000000000",
-    "clientSecret": "the app registration client secret value"
+    "clientSecret": "example-only-replace-before-use"
   },
   "Purpose": "For archival of Active Directory and entra",
   "InDaysOfInactivityBeforeDeleteQueue": 365
@@ -132,3 +132,27 @@ pwsh .\Invoke-OnPremAdArchive.ps1 -Domain "glejeune.org"
 ```
 
 `glejeune.org` is an example domain namespace. Replace it with the DNS name of the domain you are archiving. Omit `-Domain` for a normal run against the logon domain. This is not the SQL Server.
+
+## Secret scanning
+
+Secret scanning is a required build gate. `.gitleaks.toml` allowlists only the documentation placeholders: `archive-reader@example.com`, `example-only-replace-before-use`, and the all-zero GUID. A real credential in that allowlist is a failed review.
+
+- Gitleaks runs on the full history on every push and pull request. A finding fails the workflow.
+- GitHub secret scanning and push protection are also enabled on the repo.
+- Secret values are never printed in the runner log.
+
+## Code signing and deployment
+
+Signing happens only after the secret scan passes. The signing certificate stays in the runner secret store. It is not committed.
+
+Runner rules:
+
+- The runner account is not a domain admin and does not need SQL rights. Signing and archive execution are different accounts.
+- Sign on a Windows runner with PowerShell 7. Use `Set-AuthenticodeSignature -HashAlgorithm SHA256 -TimestampServer http://timestamp.digicert.com`. Timestamping is required so the signature survives certificate expiry. The URL must start with `http://`; PowerShell's cmdlet does not support HTTPS timestamping.
+- The signing authority is an enterprise code-signing CA already trusted by the archive hosts, or a public Authenticode CA. Do not mint a self-signed certificate in the job, and do not use a developer personal certificate. The certificate needs the Code Signing enhanced key usage and must not be expired.
+- Store the PFX as `CODESIGN_PFX_B64` and the PFX password as `CODESIGN_PFX_PASSWORD` in the Actions environment for `main`. Write the PFX only under `RUNNER_TEMP` and delete it after signing. A non-exportable key in an HSM or Key Vault is better when the runner can reach it.
+- Sign every PowerShell file type: `.ps1`, `.psm1`, `.psd1`, `.ps1xml`.
+- Deploy only the signed artifact. On each archive host, trust the issuing CA and put the code-signing certificate in Trusted Publishers. Do not set `Bypass`. After copy, `Get-AuthenticodeSignature` must be `Valid` and the signer thumbprint must match the authority. Stop on `NotSigned`, `HashMismatch`, or `UnknownError`.
+- SQL stays pass-through. The signing certificate is not the Active Directory bind account.
+
+Microsoft's guidance for CI/CD signing points at Azure Key Vault with an HSM-backed certificate, signed through AzureSignTool, or the Azure Artifact Signing service (about ten dollars a month) which integrates directly with GitHub Actions. Since June 2023, CAs require code-signing keys on FIPS 140-2 Level 2 hardware or better, so the HSM-backed path is the modern default.
