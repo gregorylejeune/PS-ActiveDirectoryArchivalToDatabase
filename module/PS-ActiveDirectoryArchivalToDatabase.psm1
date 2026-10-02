@@ -669,7 +669,124 @@ function Invoke-EntraArchive {
     }
 }
 
+function Test-ArchivePrerequisites {
+    [CmdletBinding()]
+    param(
+        [ValidateSet('OnPrem', 'Entra', 'Schema', 'All')]
+        [string]$Job = 'All',
+        [switch]$Install
+    )
+    try {
+        $checks = @()
+        $needOnPrem = $Job -in @('OnPrem', 'All')
+        $needEntra = $Job -in @('Entra', 'All')
+        $needSql = $true
+
+        $checks += [pscustomobject]@{
+            Name = 'Windows PowerShell 5.1 host'
+            Ready = ($PSVersionTable.PSEdition -eq 'Desktop' -or $PSVersionTable.PSVersion.Major -eq 5)
+            Detail = "Edition=$($PSVersionTable.PSEdition) Version=$($PSVersionTable.PSVersion)"
+        }
+
+        $sqlClient = [bool]([System.AppDomain]::CurrentDomain.GetAssemblies() | Where-Object { $_.GetName().Name -eq 'System.Data' })
+        if (-not $sqlClient) {
+            try {
+                Add-Type -AssemblyName System.Data
+                $sqlClient = $true
+            }
+            catch { $sqlClient = $false }
+        }
+        $checks += [pscustomobject]@{
+            Name = 'System.Data.SqlClient'
+            Ready = $sqlClient
+            Detail = 'Built into Windows PowerShell. Required for pass-through SQL connections.'
+        }
+
+        if ($needOnPrem) {
+            $adModule = [bool](Get-Module -ListAvailable -Name ActiveDirectory)
+            $checks += [pscustomobject]@{
+                Name = 'ActiveDirectory module'
+                Ready = $adModule
+                Detail = 'RSAT Active Directory Domain Services tools. Required to read users and the schema naming context.'
+            }
+            if (-not $adModule -and $Install) {
+                Write-ArchiveLog -Message 'Attempting to install RSAT Active Directory tools. This requires a local administrator.'
+                try {
+                    $capability = Get-WindowsCapability -Online -Name 'Rsat.ActiveDirectory.DS-LDS.Tools*' | Select-Object -First 1
+                    if ($capability -and $capability.State -ne 'Installed') {
+                        Add-WindowsCapability -Online -Name $capability.Name | Out-Null
+                    }
+                    $checks[-1].Ready = [bool](Get-Module -ListAvailable -Name ActiveDirectory)
+                }
+                catch {
+                    Write-ArchiveLog -Level ERROR -Message "Could not install the ActiveDirectory module. Request local administrator rights, or ask the Active Directory administrators to install RSAT on this host. $($_.Exception.Message)"
+                }
+            }
+        }
+
+        if ($needEntra) {
+            $aws = [bool](Get-Command aws -ErrorAction SilentlyContinue)
+            $checks += [pscustomobject]@{
+                Name = 'AWS CLI'
+                Ready = $aws
+                Detail = 'Required to read the Entra app secret from AWS Secrets Manager.'
+            }
+            if (-not $aws -and $Install) {
+                Write-ArchiveLog -Message 'Attempting to install the AWS CLI with winget. This may require a local administrator.'
+                try {
+                    $winget = Get-Command winget -ErrorAction SilentlyContinue
+                    if (-not $winget) { throw 'winget is not available on this host.' }
+                    & winget install --id Amazon.AWSCLI -e --accept-package-agreements --accept-source-agreements
+                    $checks[-1].Ready = [bool](Get-Command aws -ErrorAction SilentlyContinue)
+                }
+                catch {
+                    Write-ArchiveLog -Level ERROR -Message "Could not install the AWS CLI. Request local administrator rights or install AWS CLI v2 manually. $($_.Exception.Message)"
+                }
+            }
+            $awsKeys = -not [string]::IsNullOrWhiteSpace($env:AWS_ACCESS_KEY) -and -not [string]::IsNullOrWhiteSpace($env:AWS_SECRET_KEY)
+            $checks += [pscustomobject]@{
+                Name = 'AWS_ACCESS_KEY and AWS_SECRET_KEY'
+                Ready = $awsKeys
+                Detail = 'These are required to allow secrets retrieval from AWS secrets management.'
+            }
+            $checks += [pscustomobject]@{
+                Name = 'AD_ARCHIVE_ENTRA_SECRET_ID'
+                Ready = -not [string]::IsNullOrWhiteSpace($env:AD_ARCHIVE_ENTRA_SECRET_ID)
+                Detail = 'Secrets Manager id for tenantId, clientId, and clientSecret.'
+            }
+        }
+
+        if ($needSql) {
+            $checks += [pscustomobject]@{
+                Name = 'AD_ARCHIVE_SQL_SERVER'
+                Ready = -not [string]::IsNullOrWhiteSpace($env:AD_ARCHIVE_SQL_SERVER)
+                Detail = 'SQL Server instance for pass-through authentication.'
+            }
+            $checks += [pscustomobject]@{
+                Name = 'AD_ARCHIVE_SQL_DATABASE'
+                Ready = -not [string]::IsNullOrWhiteSpace($env:AD_ARCHIVE_SQL_DATABASE)
+                Detail = 'Archive database name.'
+            }
+        }
+
+        foreach ($check in $checks) {
+            $level = if ($check.Ready) { 'INFO' } else { 'ERROR' }
+            Write-ArchiveLog -Level $level -Message ("Prerequisite [{0}] {1}. {2}" -f $(if ($check.Ready) { 'ready' } else { 'missing' }), $check.Name, $check.Detail)
+        }
+        $missing = @($checks | Where-Object { -not $_.Ready })
+        if ($missing.Count -gt 0) {
+            throw ("Archive prerequisites are missing: {0}. Do not run the archive job until these are present. Install is not automatic unless -Install is passed, and install still fails closed when this account is not a local administrator." -f ($missing.Name -join ', '))
+        }
+        return $checks
+    }
+    catch {
+        Write-ArchiveLog -Level ERROR -Message $_.Exception.Message
+        throw
+    }
+}
+
 Export-ModuleMember -Function @(
+    'Test-ArchivePrerequisites',
     'Write-ArchiveLog',
     'Assert-AwsSecretPrerequisites',
     'Initialize-ArchiveDatabase',
