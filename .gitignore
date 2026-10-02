@@ -1,0 +1,6 @@
+logs/
+*.log.txt
+*.log
+.env
+*.pfx
+*.pem
