@@ -1,0 +1,41 @@
+name: sign-and-deploy
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sign-and-deploy:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, windows, codesign]
+    environment: code-signing
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Require timestamp and drop variables
+        shell: pwsh
+        env:
+          TIMESTAMP_SERVER: ${{ vars.TIMESTAMP_SERVER }}
+          DEPLOY_DROP: ${{ vars.DEPLOY_DROP }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:TIMESTAMP_SERVER)) {
+            throw 'Set repository variable TIMESTAMP_SERVER to your RFC 3161 URL.'
+          }
+          if (-not $env:TIMESTAMP_SERVER.StartsWith('http://')) {
+            throw 'TIMESTAMP_SERVER must start with http://.'
+          }
+          if ([string]::IsNullOrWhiteSpace($env:DEPLOY_DROP)) {
+            throw 'Set repository variable DEPLOY_DROP to the drop path.'
+          }
+
+      - name: Sign, verify, then copy
+        shell: pwsh
+        env:
+          TIMESTAMP_SERVER: ${{ vars.TIMESTAMP_SERVER }}
+          DEPLOY_DROP: ${{ vars.DEPLOY_DROP }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & ./.github/signing/Invoke-SignAndDeploy.ps1 -SourcePath . -DropPath $env:DEPLOY_DROP -TimestampServer $env:TIMESTAMP_SERVER
