@@ -18,24 +18,31 @@ This repository archives users. It does not delete them, disable them, or change
 - Certificate validation stays on unless `AD_ARCHIVE_SQL_TRUST_SERVER_CERTIFICATE` is explicitly set.
 - Archive every user object returned. Do not drop users because an extended attribute is unset.
 - Never archive `unicodePwd`, `ntPwdHistory`, `dBCSPwd`, `supplementalCredentials`, or `msDS-ManagedPassword`.
+- `InDaysOfInactivityBeforeDeleteQueue` is configuration only. Do not delete, disable, or queue-delete users.
 
 ## Secrets
 
-`AWS_ACCESS_KEY` and `AWS_SECRET_KEY` are required before any AWS Secrets Manager call. If either is missing, stop with: these are required to allow secrets retrieval from AWS secrets management.
+Both jobs read one secret named by `AD_ARCHIVE_ENTRA_SECRET_ID`. AWS uses `AWS.Tools.SecretsManager` (`Get-SECSecretValue`) with `AWS_ACCESS_KEY` and `AWS_SECRET_KEY` passed as parameters. Azure Key Vault uses `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, and `AD_ARCHIVE_AZURE_VAULT_NAME`.
 
-Azure Key Vault is selected with `-SecretProvider Azure`. That path requires `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, and `AD_ARCHIVE_AZURE_VAULT_NAME`. If any are missing, stop with: these are required to allow secrets retrieval from Azure secrets management.
-
-The stored secret already exists in the selected provider. `AD_ARCHIVE_ENTRA_SECRET_ID` names it. Both providers must return this JSON:
+The secret string must be this JSON:
 
 ```json
 {
-  "tenantId": "00000000-0000-0000-0000-000000000000",
-  "clientId": "00000000-0000-0000-0000-000000000000",
-  "clientSecret": "the app registration client secret value"
+  "ActiveDirectoryOnPrem": {
+    "Username": "blahblahblah-@blag.org",
+    "Password": "super secret example of json schema"
+  },
+  "AzureGraphAPI": {
+    "tenantId": "00000000-0000-0000-0000-000000000000",
+    "clientId": "00000000-0000-0000-0000-000000000000",
+    "clientSecret": "the app registration client secret value"
+  },
+  "Purpose": "For archival of Active Directory and entra",
+  "InDaysOfInactivityBeforeDeleteQueue": 365
 }
 ```
 
-Clear any copied AWS process variables when the secret call finishes. Do not log Key Vault tokens.
+On-prem binds with `ActiveDirectoryOnPrem`. Graph uses only `AzureGraphAPI`. Do not log `Password` or `clientSecret`. Do not put a SQL password in this document.
 
 ## Audit and failure
 
@@ -50,3 +57,4 @@ Clear any copied AWS process variables when the secret call finishes. Do not log
 - Do not add user-deletion logic.
 - Do not install RSAT or the AWS CLI unless the operator passed `-Install`.
 - Do not commit `logs/`.
+- Do not hardcode a domain name.
