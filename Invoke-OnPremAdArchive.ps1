@@ -3,12 +3,13 @@
 .SYNOPSIS
     Archive every on-premises Active Directory user into SQL Server staging, then merge into the system-versioned archive.
 .DESCRIPTION
-    Does not delete users. Truncates staging at the start of the run. Uses pass-through authentication to SQL Server.
-    Permission failures are logged so Active Directory administrators can grant read access.
+    Does not delete users. Pass a domain DNS name, not a domain controller. The job discovers a controller, pins the read to that host, and audits which controller answered.
+.PARAMETER Domain
+    Domain DNS name, such as glejeune.org. Omit it to use the domain the Windows account is logged into.
 #>
 [CmdletBinding()]
 param(
-    [string]$Server
+    [string]$Domain
 )
 
 Set-StrictMode -Version Latest
@@ -21,7 +22,7 @@ if (-not (Test-Path -LiteralPath $modulePath)) {
 
 try {
     Import-Module $modulePath -Force -ErrorAction Stop
-    Invoke-OnPremArchive -Server $Server
+    Invoke-OnPremArchive -Domain $Domain
 }
 catch {
     Write-Error $_.Exception.Message
