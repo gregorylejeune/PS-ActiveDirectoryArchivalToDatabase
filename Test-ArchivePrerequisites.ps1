@@ -6,13 +6,15 @@
     Does not install anything unless -Install is passed. Install attempts require a local administrator and fail closed otherwise.
 .PARAMETER Job
     OnPrem, Entra, Schema, or All.
-.PARAMETER Install
-    Try to install missing RSAT Active Directory tools and the AWS CLI. Still reports permission failures instead of continuing.
+.PARAMETER SecretProvider
+    AWS or Azure. Used when Job is Entra or All.
 #>
 [CmdletBinding()]
 param(
     [ValidateSet('OnPrem', 'Entra', 'Schema', 'All')]
     [string]$Job = 'All',
+    [ValidateSet('AWS', 'Azure')]
+    [string]$SecretProvider = 'AWS',
     [switch]$Install
 )
 
@@ -26,7 +28,7 @@ if (-not (Test-Path -LiteralPath $modulePath)) {
 
 try {
     Import-Module $modulePath -Force -ErrorAction Stop
-    [void](Test-ArchivePrerequisites -Job $Job -Install:$Install)
+    [void](Test-ArchivePrerequisites -Job $Job -SecretProvider $SecretProvider -Install:$Install)
 }
 catch {
     Write-Error $_.Exception.Message

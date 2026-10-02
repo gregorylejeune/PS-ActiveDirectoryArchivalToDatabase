@@ -23,9 +23,9 @@ This repository archives users. It does not delete them, disable them, or change
 
 `AWS_ACCESS_KEY` and `AWS_SECRET_KEY` are required before any AWS Secrets Manager call. If either is missing, stop with: these are required to allow secrets retrieval from AWS secrets management.
 
-Clear any copied AWS process variables when the secret call finishes.
+Azure Key Vault is selected with `-SecretProvider Azure`. That path requires `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, and `AD_ARCHIVE_AZURE_VAULT_NAME`. If any are missing, stop with: these are required to allow secrets retrieval from Azure secrets management.
 
-The Entra secret already exists. `AD_ARCHIVE_ENTRA_SECRET_ID` names it. The secret string must be JSON:
+The stored secret already exists in the selected provider. `AD_ARCHIVE_ENTRA_SECRET_ID` names it. Both providers must return this JSON:
 
 ```json
 {
@@ -35,7 +35,7 @@ The Entra secret already exists. `AD_ARCHIVE_ENTRA_SECRET_ID` names it. The secr
 }
 ```
 
-Do not invent a different shape. Do not write secret values into the README, logs, audit table, or commits.
+Clear any copied AWS process variables when the secret call finishes. Do not log Key Vault tokens.
 
 ## Audit and failure
 

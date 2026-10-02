@@ -127,6 +127,77 @@ function New-ArchiveLogPath {
     }
 }
 
+function Assert-AzureSecretPrerequisites {
+    [CmdletBinding()]
+    param()
+    try {
+        $missing = @()
+        foreach ($name in @('AZURE_TENANT_ID', 'AZURE_CLIENT_ID', 'AZURE_CLIENT_SECRET', 'AD_ARCHIVE_AZURE_VAULT_NAME')) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) { $missing += $name }
+        }
+        if ($missing.Count -gt 0) {
+            throw "AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, and AD_ARCHIVE_AZURE_VAULT_NAME are required to allow secrets retrieval from Azure secrets management. Missing: $($missing -join ', ')."
+        }
+    }
+    catch {
+        Write-ArchiveLog -Level ERROR -Message $_.Exception.Message
+        throw
+    }
+}
+
+function Get-AzureSecretString {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$SecretId)
+    try {
+        Assert-AzureSecretPrerequisites
+        $tokenBody = @{
+            client_id = $env:AZURE_CLIENT_ID
+            client_secret = $env:AZURE_CLIENT_SECRET
+            scope = 'https://vault.azure.net/.default'
+            grant_type = 'client_credentials'
+        }
+        $tokenUri = "https://login.microsoftonline.com/$($env:AZURE_TENANT_ID)/oauth2/v2.0/token"
+        $tokenResponse = Invoke-RestMethod -Method Post -Uri $tokenUri -Body $tokenBody -ContentType 'application/x-www-form-urlencoded'
+        if ([string]::IsNullOrWhiteSpace($tokenResponse.access_token)) {
+            throw 'Azure Key Vault token response did not contain an access token.'
+        }
+        $vaultUri = "https://$($env:AD_ARCHIVE_AZURE_VAULT_NAME).vault.azure.net/secrets/${SecretId}?api-version=7.4"
+        $secretResponse = Invoke-RestMethod -Method Get -Uri $vaultUri -Headers @{ Authorization = "Bearer $($tokenResponse.access_token)" }
+        if ([string]::IsNullOrWhiteSpace($secretResponse.value)) {
+            throw 'Azure Key Vault did not return a secret value for the configured secret name.'
+        }
+        return [string]$secretResponse.value
+    }
+    catch {
+        $message = $_.Exception.Message
+        if ($message -match 'Forbidden|403|Unauthorized|401') {
+            Write-ArchiveLog -Level ERROR -Message "Permission denied reading Azure Key Vault. Request get permission on the secret from the Key Vault administrators. $message"
+        }
+        else {
+            Write-ArchiveLog -Level ERROR -Message "Azure secret retrieval failed. $message"
+        }
+        throw
+    }
+}
+
+function Get-ArchiveSecretString {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidateSet('AWS', 'Azure')][string]$Provider,
+        [Parameter(Mandatory)][string]$SecretId
+    )
+    try {
+        if ($Provider -eq 'Azure') {
+            return Get-AzureSecretString -SecretId $SecretId
+        }
+        return Get-AwsSecretString -SecretId $SecretId
+    }
+    catch {
+        Write-ArchiveLog -Level ERROR -Message "Secret provider $Provider failed. $($_.Exception.Message)"
+        throw
+    }
+}
+
 function Assert-AwsSecretPrerequisites {
     [CmdletBinding()]
     param()
@@ -714,7 +785,10 @@ function Invoke-OnPremArchive {
 
 function Invoke-EntraArchive {
     [CmdletBinding()]
-    param()
+    param(
+        [ValidateSet('AWS', 'Azure')]
+        [string]$SecretProvider = 'AWS'
+    )
     $runId = [guid]::NewGuid()
     $script:ArchiveRunId = $runId
     $started = [datetime]::UtcNow
@@ -722,17 +796,16 @@ function Invoke-EntraArchive {
     $saved = 0
     $schemaVersionId = 0
     try {
-        Write-ArchiveLog -Message "Starting Entra ID archive run $runId."
-        [void](Test-ArchivePrerequisites -Job Entra)
-        Assert-AwsSecretPrerequisites
+        Write-ArchiveLog -Message "Starting Entra ID archive run $runId using $SecretProvider secrets management."
+        [void](Test-ArchivePrerequisites -Job Entra -SecretProvider $SecretProvider)
         $secretId = $env:AD_ARCHIVE_ENTRA_SECRET_ID
         if ([string]::IsNullOrWhiteSpace($secretId)) {
-            throw 'AD_ARCHIVE_ENTRA_SECRET_ID is required and must name the AWS Secrets Manager secret that holds tenantId, clientId, and clientSecret.'
+            throw 'AD_ARCHIVE_ENTRA_SECRET_ID is required and must name the secret that holds tenantId, clientId, and clientSecret.'
         }
-        $secret = Get-AwsSecretString -SecretId $secretId | ConvertFrom-Json
+        $secret = Get-ArchiveSecretString -Provider $SecretProvider -SecretId $secretId | ConvertFrom-Json
         foreach ($required in @('tenantId', 'clientId', 'clientSecret')) {
             if ([string]::IsNullOrWhiteSpace($secret.$required)) {
-                throw "The AWS secret is missing '$required'."
+                throw "The $SecretProvider secret is missing '$required'."
             }
         }
         $token = Get-EntraAccessToken -TenantId $secret.tenantId -ClientId $secret.clientId -ClientSecret $secret.clientSecret
@@ -774,6 +847,8 @@ function Test-ArchivePrerequisites {
     param(
         [ValidateSet('OnPrem', 'Entra', 'Schema', 'All')]
         [string]$Job = 'All',
+        [ValidateSet('AWS', 'Azure')]
+        [string]$SecretProvider = 'AWS',
         [switch]$Install
     )
     try {
@@ -828,7 +903,7 @@ function Test-ArchivePrerequisites {
             }
         }
 
-        if ($needEntra) {
+        if ($needEntra -and $SecretProvider -eq 'AWS') {
             $aws = [bool](Get-Command aws -ErrorAction SilentlyContinue)
             $checks += [pscustomobject]@{
                 Name = 'AWS CLI'
@@ -857,6 +932,24 @@ function Test-ArchivePrerequisites {
                 Name = 'AD_ARCHIVE_ENTRA_SECRET_ID'
                 Ready = -not [string]::IsNullOrWhiteSpace($env:AD_ARCHIVE_ENTRA_SECRET_ID)
                 Detail = 'Secrets Manager id for tenantId, clientId, and clientSecret.'
+            }
+        }
+
+        if ($needEntra -and $SecretProvider -eq 'Azure') {
+            $checks += [pscustomobject]@{
+                Name = 'AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AD_ARCHIVE_AZURE_VAULT_NAME'
+                Ready = @(
+                    $env:AZURE_TENANT_ID,
+                    $env:AZURE_CLIENT_ID,
+                    $env:AZURE_CLIENT_SECRET,
+                    $env:AD_ARCHIVE_AZURE_VAULT_NAME
+                ).Where({ -not [string]::IsNullOrWhiteSpace($_) }).Count -eq 4
+                Detail = 'These are required to allow secrets retrieval from Azure secrets management.'
+            }
+            $checks += [pscustomobject]@{
+                Name = 'AD_ARCHIVE_ENTRA_SECRET_ID'
+                Ready = -not [string]::IsNullOrWhiteSpace($env:AD_ARCHIVE_ENTRA_SECRET_ID)
+                Detail = 'Key Vault secret name for the tenantId, clientId, and clientSecret JSON.'
             }
         }
 

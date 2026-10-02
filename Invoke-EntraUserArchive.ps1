@@ -2,9 +2,15 @@
 <#
 .SYNOPSIS
     Archive every Microsoft Entra ID user into SQL Server staging, then merge into the system-versioned archive.
-.DESCRIPTION
-    Separate job from the on-prem archive. Requires AWS_ACCESS_KEY and AWS_SECRET_KEY so the Entra app secret can be read from AWS Secrets Manager.
+.PARAMETER SecretProvider
+    AWS reads AWS Secrets Manager. Azure reads Azure Key Vault. The secret JSON shape is the same either way.
 #>
+[CmdletBinding()]
+param(
+    [ValidateSet('AWS', 'Azure')]
+    [string]$SecretProvider = 'AWS'
+)
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
@@ -15,7 +21,7 @@ if (-not (Test-Path -LiteralPath $modulePath)) {
 
 try {
     Import-Module $modulePath -Force -ErrorAction Stop
-    Invoke-EntraArchive
+    Invoke-EntraArchive -SecretProvider $SecretProvider
 }
 catch {
     Write-Error $_.Exception.Message

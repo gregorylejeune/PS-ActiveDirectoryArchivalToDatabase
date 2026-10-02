@@ -48,7 +48,7 @@ Pass-through authentication is used for SQL Server. The account running the scri
 
 If `AWS_ACCESS_KEY` or `AWS_SECRET_KEY` is missing, the script stops with: these are required to allow secrets retrieval from AWS secrets management.
 
-The Entra secret must already exist in AWS Secrets Manager. `AD_ARCHIVE_ENTRA_SECRET_ID` is its name or ARN. The secret string is JSON with this shape and no extra required fields:
+The Entra job takes `-SecretProvider AWS` or `-SecretProvider Azure`. The stored secret must already exist. Both providers return the same JSON shape. `AD_ARCHIVE_ENTRA_SECRET_ID` is the AWS secret id or the Key Vault secret name.
 
 ```json
 {
@@ -64,7 +64,11 @@ The Entra secret must already exist in AWS Secrets Manager. `AD_ARCHIVE_ENTRA_SE
 | `clientId` | yes | App registration application (client) id GUID |
 | `clientSecret` | yes | Current client secret value, not the secret id |
 
-The app registration needs Microsoft Graph application permission `User.Read.All` with admin consent. The script reads those three fields only. Do not put the SQL password, AWS keys, or directory passwords in this secret. SQL Server still uses pass-through authentication.
+AWS requires `AWS_ACCESS_KEY` and `AWS_SECRET_KEY`. If either is missing, the script stops with: these are required to allow secrets retrieval from AWS secrets management.
+
+Azure Key Vault requires `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, and `AD_ARCHIVE_AZURE_VAULT_NAME`. If any are missing, the script stops with: these are required to allow secrets retrieval from Azure secrets management. The Key Vault identity needs get permission on that secret.
+
+The Graph app registration needs application permission `User.Read.All` with admin consent. Do not put the SQL password or the vault reader secret in the stored JSON. SQL Server still uses pass-through authentication.
 
 On-prem reads need an account that can read user objects and the schema naming context. Access denied is logged as a permission failure so Active Directory administrators can grant read access. The script does not attempt to raise its own privileges.
 
@@ -104,7 +108,8 @@ pwsh .\Test-ArchivePrerequisites.ps1 -Job OnPrem -Install
 ```powershell
 pwsh .\Initialize-ArchiveSchema.ps1
 pwsh .\Invoke-OnPremAdArchive.ps1
-pwsh .\Invoke-EntraUserArchive.ps1
+pwsh .\Invoke-EntraUserArchive.ps1 -SecretProvider AWS
+pwsh .\Invoke-EntraUserArchive.ps1 -SecretProvider Azure
 ```
 
 Optional on-prem server override: `.\Invoke-OnPremAdArchive.ps1 -Server "dc01.contoso.local"`
