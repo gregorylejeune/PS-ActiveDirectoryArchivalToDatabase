@@ -54,7 +54,7 @@ On-prem binds with `ActiveDirectoryOnPrem`. Graph uses only `AzureGraphAPI`. Do 
 
 ## Build and signing
 
-- All code signing guidance lives in `.github/signing/README.md` — one code signing guide to rule them all. Do not duplicate signing instructions elsewhere.
+- All code signing documentation lives in `.github/signing/README.md`. Do not duplicate signing instructions elsewhere in the repo.
 - `.github/workflows/ci.yml` secret-scans and parses PowerShell on every push and pull request. Signing stays off unless the workflow is dispatched with `signing_provider` set to `pfx`, `azure-key-vault`, or `ci-service`.
 - This repo does not ship a signing certificate. Adopters sign with their own secrets, or they do not sign. Do not commit a PFX, a password, or a CA private key.
 - `.gitleaks.toml` allowlists only the placeholder strings in the README example. Do not add a `paths` allowlist for `README.md`, `AGENTS.md`, or any other file.
