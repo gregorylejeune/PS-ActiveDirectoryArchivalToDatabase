@@ -19,7 +19,7 @@ Secret-like attributes (`unicodePwd`, `ntPwdHistory`, `dBCSPwd`, `supplementalCr
 
 1. `Initialize-ArchiveSchema.ps1` creates the `ad` schema, the schema-version tables, the staging tables, the run-statistics table, and a system-versioned archive table.
 2. `Invoke-OnPremAdArchive.ps1` truncates staging, reads every user object, loads staging with pass-through (Windows integrated) authentication, then runs the ETL merge into `ad.UserArchive`.
-3. `Invoke-EntraUserArchive.ps1` does the same for Entra ID users and profile properties. Entra application credentials are read from AWS Secrets Manager. They are not stored in the script.
+3. `Invoke-EntraUserArchive.ps1` does the same for Entra ID users and profile properties. Entra application credentials are read with `AWS.Tools.SecretsManager` or from Azure Key Vault. They are not stored in the script. The AWS CLI is not used.
 
 `ad.UserArchive` is a SQL Server temporal table. The merge updates a row only when the archived payload changed, so history is kept in `ad.UserArchiveHistory`.
 
@@ -41,10 +41,10 @@ Pass-through authentication is used for SQL Server. The account running the scri
 | --- | --- | --- |
 | `AD_ARCHIVE_SQL_SERVER` | Every job | SQL Server instance |
 | `AD_ARCHIVE_SQL_DATABASE` | Every job | Archive database |
-| `AWS_ACCESS_KEY` | Entra job, and any secret lookup | Access key for AWS Secrets Manager |
-| `AWS_SECRET_KEY` | Entra job, and any secret lookup | Secret key for AWS Secrets Manager |
-| `AD_ARCHIVE_AWS_REGION` | Secret lookup | Region. Defaults to `us-east-1` |
-| `AD_ARCHIVE_ENTRA_SECRET_ID` | Entra job | Secrets Manager id or name |
+| `AWS_ACCESS_KEY` | Entra job, AWS provider | Access key passed to `Get-SECSecretValue` |
+| `AWS_SECRET_KEY` | Entra job, AWS provider | Secret key passed to `Get-SECSecretValue` |
+| `AD_ARCHIVE_AWS_REGION` | AWS secret lookup | Region. Defaults to `us-east-1` |
+| `AD_ARCHIVE_ENTRA_SECRET_ID` | Entra job | Secrets Manager id or Key Vault secret name |
 
 If `AWS_ACCESS_KEY` or `AWS_SECRET_KEY` is missing, the script stops with: these are required to allow secrets retrieval from AWS secrets management.
 
@@ -64,7 +64,7 @@ The Entra job takes `-SecretProvider AWS` or `-SecretProvider Azure`. The stored
 | `clientId` | yes | App registration application (client) id GUID |
 | `clientSecret` | yes | Current client secret value, not the secret id |
 
-AWS requires `AWS_ACCESS_KEY` and `AWS_SECRET_KEY`. If either is missing, the script stops with: these are required to allow secrets retrieval from AWS secrets management.
+AWS uses the `AWS.Tools.SecretsManager` PowerShell module (`Get-SECSecretValue`). It does not use the AWS CLI. Keys are passed as cmdlet parameters and are not copied into `AWS_ACCESS_KEY_ID`.
 
 Azure Key Vault requires `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, and `AD_ARCHIVE_AZURE_VAULT_NAME`. If any are missing, the script stops with: these are required to allow secrets retrieval from Azure secrets management. The Key Vault identity needs get permission on that secret.
 
@@ -89,19 +89,20 @@ The archive host is PowerShell 7 (`pwsh`) on a domain-joined Windows machine. Th
 | Need | Used by | How to provide it |
 | --- | --- | --- |
 | ActiveDirectory module | On-prem job | RSAT: `Add-WindowsCapability -Online -Name Rsat.ActiveDirectory.DS-LDS.Tools~~~~0.0.1.0` |
-| AWS CLI v2 | Entra job | `winget install --id Amazon.AWSCLI -e` |
+| AWS.Tools.SecretsManager | Entra job, AWS provider | `Install-Module AWS.Tools.SecretsManager -Scope CurrentUser` |
 | SqlClient | Every SQL call | PowerShell 7 needs `System.Data.SqlClient` or `Microsoft.Data.SqlClient`. `Install-Module SqlServer -Scope CurrentUser` if neither loads. |
 | SQL environment variables | Every job | `AD_ARCHIVE_SQL_SERVER`, `AD_ARCHIVE_SQL_DATABASE` |
-| AWS key environment variables | Entra job | `AWS_ACCESS_KEY`, `AWS_SECRET_KEY` |
+| AWS key environment variables | Entra job, AWS provider | `AWS_ACCESS_KEY`, `AWS_SECRET_KEY` |
 
 Check before a run:
 
 ```powershell
 pwsh .\Test-ArchivePrerequisites.ps1 -Job All
 pwsh .\Test-ArchivePrerequisites.ps1 -Job OnPrem -Install
+pwsh .\Test-ArchivePrerequisites.ps1 -Job Entra -SecretProvider AWS -Install
 ```
 
-`-Install` asks Windows to add RSAT and winget to add the AWS CLI. If the account is not a local administrator, the check logs the permission failure and stops. It does not elevate itself. Active Directory read rights are separate from local admin rights and still have to be granted by the Active Directory administrators.
+`-Install` asks Windows to add RSAT and installs `AWS.Tools.SecretsManager` for the current user. It does not install the AWS CLI and it does not elevate itself. Active Directory read rights are separate from local admin rights and still have to be granted by the Active Directory administrators.
 
 ## Run
 
@@ -112,10 +113,10 @@ pwsh .\Invoke-EntraUserArchive.ps1 -SecretProvider AWS
 pwsh .\Invoke-EntraUserArchive.ps1 -SecretProvider Azure
 ```
 
-By default the on-prem job reads the domain the Windows account is already logged into. It does not need a server name for that. Pass `-Server` only when that account can reach a different domain controller and you want the read pinned to that host:
+By default the on-prem job reads the domain the Windows account is already logged into. Pass `-Domain` with a domain DNS name, not a domain controller, when you are archiving another domain. The job discovers a writable controller, pins the schema read and the user read to that host, and writes the domain, responding controller, and site to `ad.DirectoryAudit` and the file log.
 
 ```powershell
-pwsh .\Invoke-OnPremAdArchive.ps1 -Server "dc01.contoso.local"
+pwsh .\Invoke-OnPremAdArchive.ps1 -Domain "glejeune.org"
 ```
 
-`dc01.contoso.local` is an example domain controller name, not a server this repository ships with. Replace it with a controller in the domain you are archiving. Omit `-Server` for a normal run against the logon domain.
+`glejeune.org` is an example domain namespace. Replace it with the DNS name of the domain you are archiving. Omit `-Domain` for a normal run against the logon domain. This is not the SQL Server.
