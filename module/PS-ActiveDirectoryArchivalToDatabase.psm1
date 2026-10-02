@@ -39,6 +39,56 @@ $script:SyntaxMap = @{
     '2.5.5.17' = @{ Name = 'Sid'; SqlType = 'nvarchar' }
 }
 
+function Write-DirectoryAudit {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$SourceSystem,
+        [Parameter(Mandatory)][string]$ActionName,
+        [string]$Target,
+        [Parameter(Mandatory)][ValidateSet('Succeeded', 'Failed', 'AccessDenied')][string]$Outcome,
+        [int]$ObjectCount = 0,
+        [long]$DurationMs = 0,
+        [string]$ErrorMessage
+    )
+    try {
+        $safeError = $ErrorMessage
+        if ($safeError -and $safeError.Length -gt 2000) { $safeError = $safeError.Substring(0, 2000) }
+        $safeTarget = $Target
+        if ($safeTarget -and $safeTarget.Length -gt 1024) { $safeTarget = $safeTarget.Substring(0, 1024) }
+        $runValue = if ($script:ArchiveRunId) { $script:ArchiveRunId.ToString() } else { $null }
+        Write-ArchiveLog -Level $(if ($Outcome -eq 'Succeeded') { 'INFO' } else { 'ERROR' }) -Message ("Directory audit {0} {1} outcome={2} count={3} durationMs={4}" -f $SourceSystem, $ActionName, $Outcome, $ObjectCount, $DurationMs)
+        [void](Invoke-ArchiveSql -Query @'
+INSERT INTO ad.DirectoryAudit
+    (RunId, SourceSystem, ActionName, Target, Outcome, ObjectCount, DurationMs, ExecutedBy, HostName, ErrorMessage)
+VALUES
+    (TRY_CONVERT(uniqueidentifier, @RunId), @SourceSystem, @ActionName, @Target, @Outcome, @ObjectCount, @DurationMs, @ExecutedBy, @HostName, @ErrorMessage)
+'@ -NonQuery -Parameters @{
+            RunId = $runValue
+            SourceSystem = $SourceSystem
+            ActionName = $ActionName
+            Target = $safeTarget
+            Outcome = $Outcome
+            ObjectCount = $ObjectCount
+            DurationMs = $DurationMs
+            ExecutedBy = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+            HostName = [Environment]::MachineName
+            ErrorMessage = $safeError
+        })
+    }
+    catch {
+        Write-ArchiveLog -Level ERROR -Message "Directory audit insert failed for $ActionName. $($_.Exception.Message)"
+    }
+}
+
+function Get-DirectoryAuditOutcome {
+    [CmdletBinding()]
+    param([string]$Message)
+    if ($Message -match 'Access is denied|insufficient access|not authorized|Unauthorized|0x80072030|INSUFF_ACCESS_RIGHTS|Authorization_RequestDenied|Insufficient privileges|403|accessDenied') {
+        return 'AccessDenied'
+    }
+    return 'Failed'
+}
+
 function Write-ArchiveLog {
     [CmdletBinding()]
     param(
@@ -200,23 +250,31 @@ function ConvertTo-ArchivePlainValue {
 function Get-OnPremSchemaAttributes {
     [CmdletBinding()]
     param([string]$Server)
+    $started = [datetime]::UtcNow
+    $target = if ($Server) { $Server } else { 'default-domain' }
     try {
         if (-not (Get-Module -ListAvailable -Name ActiveDirectory)) {
             throw 'The ActiveDirectory PowerShell module is not installed. Request it from the Active Directory administrators or install RSAT Active Directory tools.'
         }
         Import-Module ActiveDirectory -ErrorAction Stop
         $root = if ($Server) { Get-ADRootDSE -Server $Server } else { Get-ADRootDSE }
+        Write-DirectoryAudit -SourceSystem 'OnPrem' -ActionName 'Get-ADRootDSE' -Target ([string]$root.defaultNamingContext) -Outcome Succeeded -ObjectCount 1 -DurationMs ([int64]([datetime]::UtcNow - $started).TotalMilliseconds)
+        $target = [string]$root.schemaNamingContext
         $params = @{
             SearchBase = $root.schemaNamingContext
             LDAPFilter = '(objectClass=attributeSchema)'
             Properties = @('lDAPDisplayName', 'attributeSyntax', 'isSingleValued', 'systemOnly')
         }
         if ($Server) { $params.Server = $Server }
-        return @(Get-ADObject @params)
+        $schema = @(Get-ADObject @params)
+        Write-DirectoryAudit -SourceSystem 'OnPrem' -ActionName 'Get-ADObject attributeSchema' -Target $target -Outcome Succeeded -ObjectCount $schema.Count -DurationMs ([int64]([datetime]::UtcNow - $started).TotalMilliseconds)
+        return $schema
     }
     catch {
         $message = $_.Exception.Message
-        if ($message -match 'Access is denied|insufficient access|not authorized|Unauthorized|0x80072030|INSUFF_ACCESS_RIGHTS') {
+        $outcome = Get-DirectoryAuditOutcome -Message $message
+        Write-DirectoryAudit -SourceSystem 'OnPrem' -ActionName 'Get-ADObject attributeSchema' -Target $target -Outcome $outcome -DurationMs ([int64]([datetime]::UtcNow - $started).TotalMilliseconds) -ErrorMessage $message
+        if ($outcome -eq 'AccessDenied') {
             throw "Permission denied while reading the Active Directory schema. Request read permission on the schema naming context from the Active Directory administrators. $message"
         }
         throw
@@ -296,6 +354,8 @@ VALUES
 function Get-OnPremDirectoryUsers {
     [CmdletBinding()]
     param([string]$Server)
+    $started = [datetime]::UtcNow
+    $target = if ($Server) { "$Server / (objectClass=user)" } else { 'default-domain / (objectClass=user)' }
     try {
         Import-Module ActiveDirectory -ErrorAction Stop
         $params = @{
@@ -304,11 +364,15 @@ function Get-OnPremDirectoryUsers {
             ResultPageSize = 500
         }
         if ($Server) { $params.Server = $Server }
-        return @(Get-ADUser @params)
+        $users = @(Get-ADUser @params)
+        Write-DirectoryAudit -SourceSystem 'OnPrem' -ActionName 'Get-ADUser' -Target $target -Outcome Succeeded -ObjectCount $users.Count -DurationMs ([int64]([datetime]::UtcNow - $started).TotalMilliseconds)
+        return $users
     }
     catch {
         $message = $_.Exception.Message
-        if ($message -match 'Access is denied|insufficient access|not authorized|Unauthorized|0x80072030|INSUFF_ACCESS_RIGHTS') {
+        $outcome = Get-DirectoryAuditOutcome -Message $message
+        Write-DirectoryAudit -SourceSystem 'OnPrem' -ActionName 'Get-ADUser' -Target $target -Outcome $outcome -DurationMs ([int64]([datetime]::UtcNow - $started).TotalMilliseconds) -ErrorMessage $message
+        if ($outcome -eq 'AccessDenied') {
             throw "Permission denied while reading Active Directory users. Request read access to user objects (Read all properties) from the Active Directory administrators. $message"
         }
         throw "Active Directory user read failed. $message"
@@ -522,6 +586,8 @@ function Get-EntraAccessToken {
         [Parameter(Mandatory)][string]$ClientId,
         [Parameter(Mandatory)][string]$ClientSecret
     )
+    $started = [datetime]::UtcNow
+    $target = "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/token"
     try {
         $body = @{
             client_id = $ClientId
@@ -529,16 +595,18 @@ function Get-EntraAccessToken {
             scope = 'https://graph.microsoft.com/.default'
             grant_type = 'client_credentials'
         }
-        $tokenUri = "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/token"
-        $response = Invoke-RestMethod -Method Post -Uri $tokenUri -Body $body -ContentType 'application/x-www-form-urlencoded'
+        $response = Invoke-RestMethod -Method Post -Uri $target -Body $body -ContentType 'application/x-www-form-urlencoded'
         if ([string]::IsNullOrWhiteSpace($response.access_token)) {
             throw 'Entra token response did not contain an access token.'
         }
+        Write-DirectoryAudit -SourceSystem 'Entra' -ActionName 'OAuth2 client credentials' -Target $target -Outcome Succeeded -ObjectCount 1 -DurationMs ([int64]([datetime]::UtcNow - $started).TotalMilliseconds)
         return $response.access_token
     }
     catch {
         $message = $_.Exception.Message
-        if ($message -match 'unauthorized|insufficient privileges|Authorization_RequestDenied|403') {
+        $outcome = Get-DirectoryAuditOutcome -Message $message
+        Write-DirectoryAudit -SourceSystem 'Entra' -ActionName 'OAuth2 client credentials' -Target $target -Outcome $outcome -DurationMs ([int64]([datetime]::UtcNow - $started).TotalMilliseconds) -ErrorMessage $message
+        if ($outcome -eq 'AccessDenied') {
             throw "Permission denied calling Microsoft Entra. Request admin consent for Microsoft Graph application permission User.Read.All. $message"
         }
         throw "Entra token request failed. $message"
@@ -548,14 +616,28 @@ function Get-EntraAccessToken {
 function Get-EntraDirectoryUsers {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$AccessToken)
+    $headers = @{ Authorization = "Bearer $AccessToken" }
+    $uri = 'https://graph.microsoft.com/v1.0/users?$select=id,displayName,userPrincipalName,mail,givenName,surname,accountEnabled,jobTitle,department,companyName,officeLocation,mobilePhone,businessPhones,employeeId,createdDateTime,onPremisesSamAccountName,onPremisesDistinguishedName,onPremisesDomainName,onPremisesImmutableId,onPremisesSyncEnabled&$expand=extensions'
+    $users = @()
+    $pageNumber = 0
     try {
-        $headers = @{ Authorization = "Bearer $AccessToken" }
-        $uri = 'https://graph.microsoft.com/v1.0/users?$select=id,displayName,userPrincipalName,mail,givenName,surname,accountEnabled,jobTitle,department,companyName,officeLocation,mobilePhone,businessPhones,employeeId,createdDateTime,onPremisesSamAccountName,onPremisesDistinguishedName,onPremisesDomainName,onPremisesImmutableId,onPremisesSyncEnabled&$expand=extensions'
-        $users = @()
         while ($uri) {
-            $page = Invoke-RestMethod -Method Get -Uri $uri -Headers $headers
-            $users += @($page.value)
-            $uri = $page.'@odata.nextLink'
+            $pageNumber++
+            $started = [datetime]::UtcNow
+            $pageTarget = ($uri -split '\?')[0] + " page $pageNumber"
+            try {
+                $page = Invoke-RestMethod -Method Get -Uri $uri -Headers $headers
+                $pageUsers = @($page.value)
+                $users += $pageUsers
+                Write-DirectoryAudit -SourceSystem 'Entra' -ActionName 'GET /users' -Target $pageTarget -Outcome Succeeded -ObjectCount $pageUsers.Count -DurationMs ([int64]([datetime]::UtcNow - $started).TotalMilliseconds)
+                $uri = $page.'@odata.nextLink'
+            }
+            catch {
+                $message = $_.Exception.Message
+                $outcome = Get-DirectoryAuditOutcome -Message $message
+                Write-DirectoryAudit -SourceSystem 'Entra' -ActionName 'GET /users' -Target $pageTarget -Outcome $outcome -DurationMs ([int64]([datetime]::UtcNow - $started).TotalMilliseconds) -ErrorMessage $message
+                throw
+            }
         }
         return $users
     }
@@ -572,6 +654,7 @@ function Invoke-OnPremArchive {
     [CmdletBinding()]
     param([string]$Server)
     $runId = [guid]::NewGuid()
+    $script:ArchiveRunId = $runId
     $started = [datetime]::UtcNow
     $found = 0
     $saved = 0
@@ -618,6 +701,7 @@ function Invoke-EntraArchive {
     [CmdletBinding()]
     param()
     $runId = [guid]::NewGuid()
+    $script:ArchiveRunId = $runId
     $started = [datetime]::UtcNow
     $found = 0
     $saved = 0

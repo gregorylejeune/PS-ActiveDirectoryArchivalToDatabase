@@ -23,6 +23,8 @@ Secret-like attributes (`unicodePwd`, `ntPwdHistory`, `dBCSPwd`, `supplementalCr
 
 `ad.UserArchive` is a SQL Server temporal table. The merge updates a row only when the archived payload changed, so history is kept in `ad.UserArchiveHistory`.
 
+Each directory call is also written to `ad.DirectoryAudit`: Active Directory schema read, Active Directory user read, Entra token request, and each Graph `/users` page. The row stores the run id, action, target, outcome (`Succeeded`, `Failed`, or `AccessDenied`), object count, duration, Windows identity, and host. Tokens and attribute values are not stored.
+
 Each run records how many users were found, how many were saved, and how long the run took.
 
 ## Layout

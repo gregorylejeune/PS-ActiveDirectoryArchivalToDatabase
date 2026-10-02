@@ -42,6 +42,28 @@ BEGIN
 END
 GO
 
+IF OBJECT_ID(N'ad.DirectoryAudit', N'U') IS NULL
+BEGIN
+    CREATE TABLE ad.DirectoryAudit
+    (
+        DirectoryAuditId    bigint           IDENTITY(1,1) NOT NULL CONSTRAINT PK_DirectoryAudit PRIMARY KEY,
+        RunId               uniqueidentifier NULL,
+        OccurredUtc         datetime2(3)     NOT NULL CONSTRAINT DF_DirectoryAudit_OccurredUtc DEFAULT (SYSUTCDATETIME()),
+        SourceSystem        nvarchar(32)     NOT NULL,
+        ActionName          nvarchar(128)    NOT NULL,
+        Target              nvarchar(1024)   NULL,
+        Outcome             nvarchar(32)     NOT NULL,
+        ObjectCount         int              NULL,
+        DurationMs          bigint           NULL,
+        ExecutedBy          nvarchar(256)    NULL,
+        HostName            nvarchar(256)    NULL,
+        ErrorMessage        nvarchar(2000)   NULL
+    );
+    CREATE INDEX IX_DirectoryAudit_Run ON ad.DirectoryAudit (RunId, OccurredUtc);
+    CREATE INDEX IX_DirectoryAudit_Source_Action ON ad.DirectoryAudit (SourceSystem, ActionName, OccurredUtc);
+END
+GO
+
 IF OBJECT_ID(N'ad.RunStatistic', N'U') IS NULL
 BEGIN
     CREATE TABLE ad.RunStatistic
