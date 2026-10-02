@@ -2,7 +2,7 @@
 
 Archive every on-premises Active Directory user, and separately every Microsoft Entra ID user, into SQL Server before any account is deleted.
 
-This repository does not delete users. It only reads directory data and writes an archive.
+This repository does not delete users. It only reads directory data and writes an archive. `InDaysOfInactivityBeforeDeleteQueue` is configuration only. It does not delete or disable accounts.
 
 ## What it stores
 
@@ -19,7 +19,7 @@ Secret-like attributes (`unicodePwd`, `ntPwdHistory`, `dBCSPwd`, `supplementalCr
 
 1. `Initialize-ArchiveSchema.ps1` creates the `ad` schema, the schema-version tables, the staging tables, the run-statistics table, and a system-versioned archive table.
 2. `Invoke-OnPremAdArchive.ps1` truncates staging, reads every user object, loads staging with pass-through (Windows integrated) authentication, then runs the ETL merge into `ad.UserArchive`.
-3. `Invoke-EntraUserArchive.ps1` does the same for Entra ID users and profile properties. Entra application credentials are read with `AWS.Tools.SecretsManager` or from Azure Key Vault. They are not stored in the script. The AWS CLI is not used.
+3. `Invoke-EntraUserArchive.ps1` does the same for Entra ID users and profile properties. Directory credentials are read from the archive secret with `AWS.Tools.SecretsManager` or Azure Key Vault. They are not stored in the script. The AWS CLI is not used.
 
 `ad.UserArchive` is a SQL Server temporal table. The merge updates a row only when the archived payload changed, so history is kept in `ad.UserArchiveHistory`.
 
@@ -41,34 +41,46 @@ Pass-through authentication is used for SQL Server. The account running the scri
 | --- | --- | --- |
 | `AD_ARCHIVE_SQL_SERVER` | Every job | SQL Server instance |
 | `AD_ARCHIVE_SQL_DATABASE` | Every job | Archive database |
-| `AWS_ACCESS_KEY` | Entra job, AWS provider | Access key passed to `Get-SECSecretValue` |
-| `AWS_SECRET_KEY` | Entra job, AWS provider | Secret key passed to `Get-SECSecretValue` |
+| `AWS_ACCESS_KEY` | AWS provider | Access key passed to `Get-SECSecretValue` |
+| `AWS_SECRET_KEY` | AWS provider | Secret key passed to `Get-SECSecretValue` |
 | `AD_ARCHIVE_AWS_REGION` | AWS secret lookup | Region. Defaults to `us-east-1` |
-| `AD_ARCHIVE_ENTRA_SECRET_ID` | Entra job | Secrets Manager id or Key Vault secret name |
+| `AD_ARCHIVE_ENTRA_SECRET_ID` | Both jobs | Archive secret id or Key Vault secret name |
 
 If `AWS_ACCESS_KEY` or `AWS_SECRET_KEY` is missing, the script stops with: these are required to allow secrets retrieval from AWS secrets management.
 
-The Entra job takes `-SecretProvider AWS` or `-SecretProvider Azure`. The stored secret must already exist. Both providers return the same JSON shape. `AD_ARCHIVE_ENTRA_SECRET_ID` is the AWS secret id or the Key Vault secret name.
+Both jobs read one secret. `-SecretProvider AWS` uses `AWS.Tools.SecretsManager`. `-SecretProvider Azure` uses Azure Key Vault. The secret string must already exist and must be this JSON:
 
 ```json
 {
-  "tenantId": "00000000-0000-0000-0000-000000000000",
-  "clientId": "00000000-0000-0000-0000-000000000000",
-  "clientSecret": "the app registration client secret value"
+  "ActiveDirectoryOnPrem": {
+    "Username": "blahblahblah-@blag.org",
+    "Password": "super secret example of json schema"
+  },
+  "AzureGraphAPI": {
+    "tenantId": "00000000-0000-0000-0000-000000000000",
+    "clientId": "00000000-0000-0000-0000-000000000000",
+    "clientSecret": "the app registration client secret value"
+  },
+  "Purpose": "For archival of Active Directory and entra",
+  "InDaysOfInactivityBeforeDeleteQueue": 365
 }
 ```
 
 | Field | Required | Format |
 | --- | --- | --- |
-| `tenantId` | yes | Entra tenant GUID |
-| `clientId` | yes | App registration application (client) id GUID |
-| `clientSecret` | yes | Current client secret value, not the secret id |
+| `ActiveDirectoryOnPrem.Username` | yes | On-prem bind account, `DOMAIN\\user` or `user@domain` |
+| `ActiveDirectoryOnPrem.Password` | yes | Password for that bind account |
+| `AzureGraphAPI.tenantId` | yes | Entra tenant GUID |
+| `AzureGraphAPI.clientId` | yes | App registration client id GUID |
+| `AzureGraphAPI.clientSecret` | yes | Client secret value, not the secret id |
+| `Purpose` | yes | Short reason this secret exists |
+| `InDaysOfInactivityBeforeDeleteQueue` | yes | Integer days. Configuration only. This job does not delete users. |
 
-AWS uses the `AWS.Tools.SecretsManager` PowerShell module (`Get-SECSecretValue`). It does not use the AWS CLI. Keys are passed as cmdlet parameters and are not copied into `AWS_ACCESS_KEY_ID`.
+AWS uses `Get-SECSecretValue`. It does not use the AWS CLI. Keys are passed as cmdlet parameters and are not copied into `AWS_ACCESS_KEY_ID`.
 
 Azure Key Vault requires `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, and `AD_ARCHIVE_AZURE_VAULT_NAME`. If any are missing, the script stops with: these are required to allow secrets retrieval from Azure secrets management. The Key Vault identity needs get permission on that secret.
 
-The Graph app registration needs application permission `User.Read.All` with admin consent. Do not put the SQL password or the vault reader secret in the stored JSON. SQL Server still uses pass-through authentication.
+The Graph app registration needs application permission `User.Read.All` with admin consent. Do not put the SQL password or the vault reader secret in the stored JSON. SQL Server still uses pass-through authentication. Do not log `Password` or `clientSecret`.
 
 On-prem reads need an account that can read user objects and the schema naming context. Access denied is logged as a permission failure so Active Directory administrators can grant read access. The script does not attempt to raise its own privileges.
 
@@ -89,10 +101,10 @@ The archive host is PowerShell 7 (`pwsh`) on a domain-joined Windows machine. Th
 | Need | Used by | How to provide it |
 | --- | --- | --- |
 | ActiveDirectory module | On-prem job | RSAT: `Add-WindowsCapability -Online -Name Rsat.ActiveDirectory.DS-LDS.Tools~~~~0.0.1.0` |
-| AWS.Tools.SecretsManager | Entra job, AWS provider | `Install-Module AWS.Tools.SecretsManager -Scope CurrentUser` |
+| AWS.Tools.SecretsManager | AWS provider | `Install-Module AWS.Tools.SecretsManager -Scope CurrentUser` |
 | SqlClient | Every SQL call | PowerShell 7 needs `System.Data.SqlClient` or `Microsoft.Data.SqlClient`. `Install-Module SqlServer -Scope CurrentUser` if neither loads. |
 | SQL environment variables | Every job | `AD_ARCHIVE_SQL_SERVER`, `AD_ARCHIVE_SQL_DATABASE` |
-| AWS key environment variables | Entra job, AWS provider | `AWS_ACCESS_KEY`, `AWS_SECRET_KEY` |
+| AWS key environment variables | AWS provider | `AWS_ACCESS_KEY`, `AWS_SECRET_KEY` |
 
 Check before a run:
 
