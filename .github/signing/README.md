@@ -1,11 +1,11 @@
 # Code signing
 
-This folder holds the adopter-facing signing pieces. The repository does not ship a certificate, and the author does not sign adopter builds. Each fork configures its own signing.
+This folder is the single home for code signing in this repository. All signing documentation lives here. Do not duplicate signing instructions in the root README or AGENTS.md — link to this guide instead.
 
 ## Files
 
+- `README.md` — this guide. Modes, setup, verification, and rules.
 - `Invoke-AdopterSign.ps1` — stub for the `ci-service` signing provider. Replace it with your own signer. Do not put a token in this file.
-- `README.md` — this guide.
 
 ## Generate the workflow
 
